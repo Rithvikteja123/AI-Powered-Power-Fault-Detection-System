@@ -1,11 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Dashboard from './pages/Dashboard.jsx';
 
-// Use relative URLs so Vite proxy forwards /api → localhost:5050 (no CORS issues)
+// Local dev: empty string → Vite proxy to localhost:5050
+// Vercel prod: VITE_API_URL = https://your-backend.onrender.com
 const API = import.meta.env.VITE_API_URL || '';
+
+// WebSocket: use VITE_WS_URL env var in prod, or derive from current host in dev
 const WS_URL = import.meta.env.VITE_WS_URL ||
-  (window.location.protocol === 'https:' ? 'wss://' : 'ws://') +
-  window.location.host + '/ws';
+  (import.meta.env.VITE_API_URL
+    ? import.meta.env.VITE_API_URL.replace(/^https?/, m => m === 'https' ? 'wss' : 'ws') + '/ws'
+    : (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws');
 
 export default function App() {
   const [tickets, setTickets]       = useState([]);
