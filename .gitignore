@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Environment & Secrets
+.env
+.env.local
+
+# SQLite Database & Logs
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.log
+
+# Build Outputs
+dist/
+build/
+
+# macOS / OS Files
+.DS_Store
+__MACOSX/

@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       kspdb
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d kspdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT:        5000
+      DB_HOST:     postgres
+      DB_PORT:     5432
+      DB_NAME:     kspdb
+      DB_USER:     postgres
+      DB_PASSWORD: ${DB_PASSWORD:-password}
+      NODE_ENV:    production
+      # Optional — leave blank for template-based AI summaries
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "5000:5000"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ""     # empty = same-origin (nginx proxy)
+        VITE_WS_URL:  ""     # empty = auto-detect from browser URL
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "3000:80"
+
+volumes:
+  postgres_data:
