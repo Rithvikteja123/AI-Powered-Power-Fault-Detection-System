@@ -1,15 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Dashboard from './pages/Dashboard.jsx';
 
-// Local dev: empty string → Vite proxy to localhost:5050
-// Vercel prod: VITE_API_URL = https://your-backend.onrender.com
+// Relative URL works for both:
+//  - Local dev: Vite proxies /api → localhost:5050
+//  - Vercel:    /api/* → serverless function
 const API = import.meta.env.VITE_API_URL || '';
 
-// WebSocket: use VITE_WS_URL env var in prod, or derive from current host in dev
-const WS_URL = import.meta.env.VITE_WS_URL ||
-  (import.meta.env.VITE_API_URL
-    ? import.meta.env.VITE_API_URL.replace(/^https?/, m => m === 'https' ? 'wss' : 'ws') + '/ws'
-    : (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws');
+// Try WebSocket first (local dev). Fall back to polling on Vercel (wss:// not supported on serverless).
+const IS_VERCEL   = import.meta.env.PROD && !import.meta.env.VITE_WS_URL;
+const WS_URL      = import.meta.env.VITE_WS_URL ||
+  (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/ws';
+const POLL_MS     = 8_000;  // Poll interval when WebSocket unavailable
 
 export default function App() {
   const [tickets, setTickets]       = useState([]);
@@ -19,71 +20,81 @@ export default function App() {
   const [toasts, setToasts]         = useState([]);
   const [simStatus, setSimStatus]   = useState('');
   const [theme, setTheme]           = useState(() => localStorage.getItem('pf-theme') || 'light');
-  const wsRef = useRef(null);
+  const wsRef        = useRef(null);
+  const prevTickets  = useRef([]);
 
-  // ── Apply theme ──────────────────────────────────────────────────────────
+  // ── Theme ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
     localStorage.setItem('pf-theme', theme);
   }, [theme]);
 
-  const toggleTheme = useCallback(() => {
-    setTheme(t => t === 'light' ? 'dark' : 'light');
-  }, []);
+  const toggleTheme = useCallback(() => setTheme(t => t === 'light' ? 'dark' : 'light'), []);
 
-  // ── Toast helpers ────────────────────────────────────────────────────────
+  // ── Toasts ─────────────────────────────────────────────────────────────────
   const addToast = useCallback((msg, type = 'info') => {
     const id = Date.now();
     setToasts(t => [...t, { id, msg, type }]);
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 5000);
   }, []);
 
-  // ── Fetch helpers ────────────────────────────────────────────────────────
+  // ── Data fetchers ──────────────────────────────────────────────────────────
   const fetchTickets = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/api/tickets`);
+      const res  = await fetch(`${API}/api/tickets`);
       const data = await res.json();
-      setTickets(data.tickets || []);
+      const next = data.tickets || [];
+
+      // Detect new faults compared to previous fetch (used in polling mode)
+      if (IS_VERCEL && prevTickets.current.length > 0) {
+        const prevIds = new Set(prevTickets.current.map(t => t.id));
+        const newOnes = next.filter(t => !prevIds.has(t.id));
+        newOnes.forEach(t => addToast(`🚨 New fault — ${t.fault_type} at PIN ${t.pincode || '?'}`, 'danger'));
+      }
+      prevTickets.current = next;
+      setTickets(next);
     } catch (e) { console.error('fetchTickets', e); }
-  }, []);
+  }, [addToast]);
 
   const fetchStats = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/api/stats`);
+      const res  = await fetch(`${API}/api/stats`);
       const data = await res.json();
       setStats(data);
-    } catch (e) { /* silent */ }
+    } catch (_) {}
   }, []);
 
-  // ── WebSocket ────────────────────────────────────────────────────────────
+  // ── WebSocket (local dev & self-hosted only) ───────────────────────────────
   const connectWs = useCallback(() => {
+    if (IS_VERCEL) return;                                      // skip WS on Vercel
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const ws = new WebSocket(WS_URL);
     wsRef.current = ws;
     setWsStatus('connecting');
 
-    ws.onopen = () => setWsStatus('connected');
+    ws.onopen  = () => setWsStatus('connected');
+    ws.onerror = () => setWsStatus('disconnected');
+    ws.onclose = () => { setWsStatus('disconnected'); setTimeout(connectWs, 3000); };
 
     ws.onmessage = (e) => {
       try {
         const { type, data } = JSON.parse(e.data);
-
         if (type === 'ticket_created') {
-          setTickets(prev => [data, ...prev]);
-          addToast(`🚨 New fault detected — ${data.fault_type} at PIN ${data.pincode || '?'}`, 'danger');
+          setTickets(p => [data, ...p]);
+          addToast(`🚨 New fault — ${data.fault_type} at PIN ${data.pincode || '?'}`, 'danger');
           fetchStats(); fetchTickets();
         } else if (type === 'ticket_updated') {
-          setTickets(prev => prev.map(t => t.id === data.id ? { ...t, ...data } : t));
+          setTickets(p => p.map(t => t.id === data.id ? { ...t, ...data } : t));
           fetchStats(); fetchTickets();
         } else if (type === 'ticket_closed') {
-          setTickets(prev => prev.filter(t => t.id !== data.id));
-          addToast('✅ Fault cleared — power restored and verified', 'success');
+          setTickets(p => p.filter(t => t.id !== data.id));
+          addToast('✅ Fault cleared — power restored', 'success');
           fetchStats(); fetchTickets();
         } else if (type === 'pole_state_changed') {
           setPoleStates(prev => {
             const next = new Map(prev);
-            next.set(data.pole_id, { energized: data.energized, event: data.event, ts: data.ts });
+            next.set(data.pole_id, { energized: data.energized, ts: data.ts });
             return next;
           });
           fetchStats();
@@ -100,29 +111,29 @@ export default function App() {
         }
       } catch (_) {}
     };
-
-    ws.onclose = () => {
-      setWsStatus('disconnected');
-      setTimeout(connectWs, 3000);
-    };
-
-    ws.onerror = () => setWsStatus('disconnected');
   }, [addToast, fetchStats, fetchTickets]);
 
-  // ── Init ──────────────────────────────────────────────────────────────────
+  // ── Init + polling fallback ─────────────────────────────────────────────────
   useEffect(() => {
     fetchTickets();
     fetchStats();
-    connectWs();
 
-    const statsInterval  = setInterval(fetchStats, 10_000);
-    const ticketInterval = setInterval(fetchTickets, 30_000);
-
-    return () => {
-      clearInterval(statsInterval);
-      clearInterval(ticketInterval);
-      wsRef.current?.close();
-    };
+    if (IS_VERCEL) {
+      // Vercel: no persistent WS → poll every 8 seconds
+      setWsStatus('connected');   // show "Connected" via polling
+      const poll = setInterval(() => { fetchTickets(); fetchStats(); }, POLL_MS);
+      return () => clearInterval(poll);
+    } else {
+      // Local / Render: use real WebSocket + background polling
+      connectWs();
+      const statsI   = setInterval(fetchStats, 10_000);
+      const ticketsI = setInterval(fetchTickets, 30_000);
+      return () => {
+        clearInterval(statsI);
+        clearInterval(ticketsI);
+        wsRef.current?.close();
+      };
+    }
   }, [fetchTickets, fetchStats, connectWs]);
 
   return (
@@ -140,7 +151,6 @@ export default function App() {
         apiBase={API}
       />
 
-      {/* Toast container */}
       <div className="toast-container">
         {toasts.map(t => (
           <div key={t.id} className={`toast toast--${t.type}`}>

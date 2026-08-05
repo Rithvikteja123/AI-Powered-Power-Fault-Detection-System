@@ -7,6 +7,7 @@ export default defineConfig({
     port: 3000,
     strictPort: false,
     proxy: {
+      // Dev only: forward to local backend on 5050
       '/api': {
         target: 'http://localhost:5050',
         changeOrigin: true,
@@ -15,6 +16,14 @@ export default defineConfig({
         target: 'ws://localhost:5050',
         ws: true,
       },
+      '/health': {
+        target: 'http://localhost:5050',
+        changeOrigin: true,
+      },
     },
+  },
+  build: {
+    outDir: 'dist',
+    sourcemap: false,
   },
 });
